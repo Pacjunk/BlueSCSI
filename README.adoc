@@ -14,9 +14,9 @@ BlueSCSI & ArdSCSino are hardware that reproduces SCSI devices (hard disks) with
 
 The VAX Enhanced version by Pacjunk adds:
 
-* Support for per image vendor information. Create a text file matching the image name, but prefixed with "#" containing the vendor strings
 * Support for ODS-2 CD-ROM images (512 bytes/block). Images names start with "CD". e.g. CD40_512_VAXVMS072.ISO
 * Support for READLONG(10) and WRITELONG(10) commands to support OpenVMS volume shadowing
+* Support for per image vendor information. Create a text file matching the image name, but prefixed with "#" containing the vendor strings
 
 
 `ArdSCSino-stm32` created by https://github.com/ztto/ArdSCSino-stm32[ztto] is the STM32 version of `ArdSCSino`
