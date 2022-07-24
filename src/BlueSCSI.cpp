@@ -42,10 +42,12 @@
 #warning "warning USE_STM32_DMA"
 #endif
 
-#define VERSION "2.0-PACJUNK(220206)"
-#define DEBUG            0      // 0:No debug information output
+#define VERSION "2.1-PACJUNK(220724)"
+#define DEBUG            4      // 0:No debug information output
                                 // 1: Debug information output to USB Serial
                                 // 2: Debug information output to LOG.txt (slow)
+                                // 3: Report unsupported command and page codes only to LOG.txt
+                                // 4: Same as 3, but extra command debugging
 
 #define USE_DB2ID_TABLE      1 // Use table to get ID from SEL-DB
 
@@ -56,6 +58,8 @@
 
 // HDD format
 #define MAX_BLOCKSIZE 8192     // Maximum BLOCK size
+#define GEOM_HEADS    16       // Default number of heads
+#define GEOM_SECTORS  63       // Default number of sectors per track.
 
 // SDFAT
 #define SD1_CONFIG SdSpiConfig(PA4, DEDICATED_SPI, SPI_FULL_SPEED, &SPI)
@@ -616,7 +620,7 @@ void setup()
  */
 void initFileLog() {
   LOG_FILE = SD.open(LOG_FILENAME, O_WRONLY | O_CREAT | O_TRUNC);
-  LOG_FILE.println("BlueSCSI <-> SD - https://github.com/erichelgeson/BlueSCSI");
+  LOG_FILE.println("BlueSCSI <-> SD - https://github.com/Pacjunk/BlueSCSI");
   LOG_FILE.print("VERSION: ");
   LOG_FILE.println(VERSION);
   LOG_FILE.print("DEBUG:");
@@ -663,7 +667,9 @@ void finalizeFileLog() {
   }
   LOG_FILE.println("Finished initialization of SCSI Devices - Entering main loop.");
   LOG_FILE.sync();
-  LOG_FILE.close();
+  #if DEBUG <= 1 
+    LOG_FILE.close();
+  #endif
 }
 
 /*
@@ -769,7 +775,7 @@ void writeDataPhaseSD(uint32_t adds, uint32_t len)
   LOGN("DATAIN PHASE(SD)");
   const uint32_t BUFBLOCKS = MAX_BLOCKSIZE / m_img->m_blocksize;  // Number of blocks buffer can hold
   register const uint32_t *bsrr_tbl = db_bsrr;  // Table to convert to BSRR
-  m_img->m_file.seek(adds * m_img->m_blocksize);
+  m_img->m_file.seekSet((uint64_t)adds * m_img->m_blocksize);
 
   SCSI_PHASE_DATA_IN();
   SCSI_DB_OUTPUT();
@@ -829,7 +835,7 @@ void writelongDataPhaseSD(uint32_t adds, uint32_t len)
 {
   LOGN("DATAIN PHASE(SD)");
   register const uint32_t *bsrr_tbl = db_bsrr;  // Table to convert to BSRR
-  m_img->m_file.seek(adds * m_img->m_blocksize);
+  m_img->m_file.seekSet((uint64_t)adds * m_img->m_blocksize);
 
   SCSI_PHASE_DATA_IN();
   SCSI_DB_OUTPUT();
@@ -875,8 +881,8 @@ void readDataPhase(int len, byte* p)
 void readDataPhaseSD(uint32_t adds, uint32_t len)
 {
   LOGN("DATAOUT PHASE(SD)");
-  uint32_t pos = adds * m_img->m_blocksize;
-  m_img->m_file.seek(pos);
+  m_img->m_file.seekSet((uint64_t)adds * m_img->m_blocksize);
+  
   SCSI_PHASE_DATA_OUT();
 
   for(uint32_t i = 0; i < len; i++) {
@@ -908,10 +914,9 @@ void readDataPhaseSD(uint32_t adds, uint32_t len)
 void readlongDataPhaseSD(uint32_t adds, uint32_t len)
 {
   LOGN("DATAOUT PHASE(SD)");
-  uint32_t pos = adds * m_img->m_blocksize;
   uint32_t idx;
+  m_img->m_file.seekSet((uint64_t)adds * m_img->m_blocksize);
 
-  m_img->m_file.seek(pos);
   SCSI_PHASE_DATA_OUT();
 
   while (len > 0) {
@@ -1047,6 +1052,29 @@ byte onWriteLongCommand(uint32_t adds, uint32_t len)
 }
 
 /*
+ * MODE SELECT command processing.
+ */
+byte onModeSelectCommand(byte scsi_cmd, byte sp, uint32_t len)
+{
+  if(!m_img) return 0x02; // No image file
+  if (sp == 1) {
+    m_senseKey = 5; // Illegal request
+    m_addition_sense = 0x2400; // Invalid field in CDB
+    return 0x02;
+  }
+  readDataPhase(len, m_buf); // Read data in, but don't do anything with it.
+  #if DEBUG == 4
+  LOG_FILE.println("Select data : ");
+  for (unsigned i = 0; i < len; i++) {
+    LOG_FILE.print(m_buf[i], HEX); LOG_FILE.print(" ");
+  }
+  LOG_FILE.println("");
+  LOG_FILE.sync();
+  #endif
+  return 0x00;
+}
+
+/*
  * MODE SENSE command processing.
  */
 byte onModeSenseCommand(byte scsi_cmd, byte dbd, int cmd2, uint32_t len)
@@ -1055,9 +1083,11 @@ byte onModeSenseCommand(byte scsi_cmd, byte dbd, int cmd2, uint32_t len)
 
   uint32_t bl =  m_img->m_blocksize;
   uint32_t bc = m_img->m_fileSize / bl;
+  unsigned cylinders = bc / (GEOM_HEADS * GEOM_SECTORS);
   
   memset(m_buf, 0, sizeof(m_buf));
   int page_code = cmd2 & 0x3F;
+  int pageControl = cmd2 >> 6;
   int a = (scsi_cmd == 0x5A) ? 8 : 4;
   
   if(dbd == 0) {
@@ -1088,10 +1118,12 @@ byte onModeSenseCommand(byte scsi_cmd, byte dbd, int cmd2, uint32_t len)
       case 0x03:  //Drive parameters
         m_buf[a + 0] = 0x03; //Page code
         m_buf[a + 1] = 0x16; // Page length
-        m_buf[a + 11] = 0x3F;//Number of sectors / track
-        m_buf[a + 12] = (byte)(m_img->m_blocksize >> 8);
-        m_buf[a + 13] = (byte)m_img->m_blocksize;
-        m_buf[a + 15] = 0x1; // Interleave
+        if(pageControl != 1) {
+            m_buf[a + 11] = 0x3F;//Number of sectors / track
+            m_buf[a + 12] = (byte)(bl >> 8);
+            m_buf[a + 13] = (byte)bl;
+            m_buf[a + 15] = 0x1; // Interleave
+        }
         a += 0x18;
         if(page_code != 0x3F) break;
         
@@ -1102,20 +1134,50 @@ byte onModeSenseCommand(byte scsi_cmd, byte dbd, int cmd2, uint32_t len)
 	        sector = temp % sectors_per_track + 1
       */
       case 0x04:  //Drive parameters
-      {
-        unsigned cylinders = bc / (16 * 63);
         m_buf[a + 0] = 0x04; //Page code
         m_buf[a + 1] = 0x16; // Page length
-        m_buf[a + 2] = (byte)(cylinders >> 16); // Cylinders
-        m_buf[a + 3] = (byte)(cylinders >> 8);
-        m_buf[a + 4] = (byte)cylinders;
-        m_buf[a + 5] = 16;   //Number of heads
+        if(pageControl != 1) {
+          m_buf[a + 2] = (byte)(cylinders >> 16); // Cylinders
+          m_buf[a + 3] = (byte)(cylinders >> 8);
+          m_buf[a + 4] = (byte)cylinders;
+          m_buf[a + 5] = GEOM_HEADS;   //Number of heads
+        }
         a += 0x18;
         if(page_code != 0x3F) break;
-      }
+
+      case 0x05:  //Flexible Geometry
+        m_buf[a + 0] = 0x05;
+        m_buf[a + 1] = 0x1E;  // Page length
+        if(pageControl != 1) {
+          m_buf[a + 2] = 0x03; 
+          m_buf[a + 3] = 0xE8; // Transfer rate 1 mbit/s
+          m_buf[a + 4] = GEOM_HEADS; // Number of heads
+          m_buf[a + 5] = GEOM_SECTORS; // Sectors per track
+          m_buf[a + 6] = (byte)(bl >> 8);
+          m_buf[a + 7] = (byte)bl;  // Data bytes per sector
+          m_buf[a + 8] = (byte)(cylinders >> 8);
+          m_buf[a + 9] = (byte)cylinders;
+        }
+        a += 0x20;
+        if(page_code != 0x3F) break;
+    
+      case 0x08:  // Caching
+        m_buf[a + 0] = 0x08; //Page code
+        m_buf[a + 1] = 0x0A; // Page length
+        if(pageControl != 1) {
+          m_buf[a + 2] = 0x01; // Disable read cache
+        }
+        a += 0x08;
+        if(page_code != 0x3F) break;
+
       break; // Don't want 0x3F falling through to error condition
 
   default:
+    #if DEBUG >= 3
+      LOG_FILE.print("Unsupported page code : ");
+      LOG_FILE.print(page_code, HEX); LOG_FILE.print(" for command "); LOG_FILE.println(scsi_cmd, HEX);
+      LOG_FILE.sync();
+    #endif
     m_senseKey = 5; // Illegal request
     m_addition_sense = 0x2400; // Invalid field in CDB
     return 0x02;
@@ -1131,6 +1193,21 @@ byte onModeSenseCommand(byte scsi_cmd, byte dbd, int cmd2, uint32_t len)
     m_buf[0] = a - 1;
     m_buf[3] = 0x08;
   }
+
+  #if DEBUG == 4
+      LOG_FILE.println("");
+      LOG_FILE.print("ModeSense ");  LOG_FILE.print(scsi_cmd, HEX); LOG_FILE.print(" command for ID ");
+      LOG_FILE.print(m_id); LOG_FILE.print(" LUN "); LOG_FILE.print(m_lun);
+      LOG_FILE.print(" : PageCode="); LOG_FILE.print(page_code, HEX);
+      LOG_FILE.print(" PageControl="); LOG_FILE.println(pageControl, HEX);
+      LOG_FILE.print("ModeSense Response: ");
+      for (unsigned i = 0; i < len; i++) {
+        LOG_FILE.print(m_buf[i], HEX); LOG_FILE.print(" ");
+      }
+      LOG_FILE.println("");
+      LOG_FILE.sync();
+  #endif
+
   writeDataPhase(len < a ? len : a, m_buf);
   return 0x00;
 }
@@ -1296,15 +1373,63 @@ void loop()
 
   LOGN("");
   switch(cmd[0]) {
+  case 0x08:
+    LOGN("[Read6]");
+    m_sts |= onReadCommand((((uint32_t)cmd[1] & 0x1F) << 16) | ((uint32_t)cmd[2] << 8) | cmd[3], (cmd[4] == 0) ? 0x100 : cmd[4]);
+    break;
+  case 0x0A:
+    LOGN("[Write6]");
+    m_sts |= onWriteCommand((((uint32_t)cmd[1] & 0x1F) << 16) | ((uint32_t)cmd[2] << 8) | cmd[3], (cmd[4] == 0) ? 0x100 : cmd[4]);
+    break;
+  case 0x28:
+    LOGN("[Read10]");
+    m_sts |= onReadCommand(((uint32_t)cmd[2] << 24) | ((uint32_t)cmd[3] << 16) | ((uint32_t)cmd[4] << 8) | cmd[5], ((uint32_t)cmd[7] << 8) | cmd[8]);
+    break;
+  case 0x2A:
+    LOGN("[Write10]");
+    m_sts |= onWriteCommand(((uint32_t)cmd[2] << 24) | ((uint32_t)cmd[3] << 16) | ((uint32_t)cmd[4] << 8) | cmd[5], ((uint32_t)cmd[7] << 8) | cmd[8]);
+    break;
+  case 0x3E:
+    LOGN("[ReadLong10]");
+    m_sts |= onReadLongCommand(((uint32_t)cmd[2] << 24) | ((uint32_t)cmd[3] << 16) | ((uint32_t)cmd[4] << 8) | cmd[5], ((uint32_t)cmd[7] << 8) | cmd[8]);
+    break;
+  case 0x3F:
+    LOGN("[WriteLong10]");
+    m_sts |= onWriteLongCommand(((uint32_t)cmd[2] << 24) | ((uint32_t)cmd[3] << 16) | ((uint32_t)cmd[4] << 8) | cmd[5], ((uint32_t)cmd[7] << 8) | cmd[8]);
+    break;
+  case 0x1A:
+    LOGN("[ModeSense6]");
+    m_sts |= onModeSenseCommand(cmd[0], cmd[1]&0x08, cmd[2], cmd[4]);
+    break;
+  case 0x5A:
+    LOGN("[ModeSense10]");
+    m_sts |= onModeSenseCommand(cmd[0], cmd[1]&0x08, cmd[2], ((uint32_t)cmd[7] << 8) | cmd[8]);
+    break;
+  case 0x03:
+    LOGN("[RequestSense]");
+    onRequestSenseCommand(cmd[4]);
+    break;
+  case 0x12:
+    LOGN("[Inquiry]");
+    m_sts |= onInquiryCommand(cmd[4]);
+    break;
+  case 0x15:
+    LOGN("[ModeSelect6]");
+    m_sts |= onModeSelectCommand(cmd[0], cmd[1]&0x01, cmd[4]);
+    break;
+  case 0x55:
+    LOGN("[ModeSelect10]");
+    m_sts |= onModeSelectCommand(cmd[0], cmd[1]&0x01, ((uint32_t)cmd[7] << 8) | cmd[8]);
+    break;
+  case 0x25:
+    LOGN("[ReadCapacity]");
+    m_sts |= onReadCapacityCommand(cmd[8]);
+    break;
   case 0x00:
     LOGN("[Test Unit]");
     break;
   case 0x01:
     LOGN("[Rezero Unit]");
-    break;
-  case 0x03:
-    LOGN("[RequestSense]");
-    onRequestSenseCommand(cmd[4]);
     break;
   case 0x04:
     LOGN("[FormatUnit]");
@@ -1315,24 +1440,8 @@ void loop()
   case 0x07:
     LOGN("[ReassignBlocks]");
     break;
-  case 0x08:
-    LOGN("[Read6]");
-    m_sts |= onReadCommand((((uint32_t)cmd[1] & 0x1F) << 16) | ((uint32_t)cmd[2] << 8) | cmd[3], (cmd[4] == 0) ? 0x100 : cmd[4]);
-    break;
-  case 0x0A:
-    LOGN("[Write6]");
-    m_sts |= onWriteCommand((((uint32_t)cmd[1] & 0x1F) << 16) | ((uint32_t)cmd[2] << 8) | cmd[3], (cmd[4] == 0) ? 0x100 : cmd[4]);
-    break;
   case 0x0B:
     LOGN("[Seek6]");
-    break;
-  case 0x12:
-    LOGN("[Inquiry]");
-    m_sts |= onInquiryCommand(cmd[4]);
-    break;
-  case 0x1A:
-    LOGN("[ModeSense6]");
-    m_sts |= onModeSenseCommand(cmd[0], cmd[1]&0x80, cmd[2], cmd[4]);
     break;
   case 0x1B:
     LOGN("[StartStopUnit]");
@@ -1340,35 +1449,21 @@ void loop()
   case 0x1E:
     LOGN("[PreAllowMed.Removal]");
     break;
-  case 0x25:
-    LOGN("[ReadCapacity]");
-    m_sts |= onReadCapacityCommand(cmd[8]);
-    break;
-  case 0x28:
-    LOGN("[Read10]");
-    m_sts |= onReadCommand(((uint32_t)cmd[2] << 24) | ((uint32_t)cmd[3] << 16) | ((uint32_t)cmd[4] << 8) | cmd[5], ((uint32_t)cmd[7] << 8) | cmd[8]);
-    break;
-  case 0x2A:
-    LOGN("[Write10]");
-    m_sts |= onWriteCommand(((uint32_t)cmd[2] << 24) | ((uint32_t)cmd[3] << 16) | ((uint32_t)cmd[4] << 8) | cmd[5], ((uint32_t)cmd[7] << 8) | cmd[8]);
-    break;
   case 0x2B:
     LOGN("[Seek10]");
     break;
-  case 0x3E:
-    LOGN("[ReadLong10]");
-    m_sts |= onReadLongCommand(((uint32_t)cmd[2] << 24) | ((uint32_t)cmd[3] << 16) | ((uint32_t)cmd[4] << 8) | cmd[5], ((uint32_t)cmd[7] << 8) | cmd[8]);
-    break;
-  case 0x3F:
-    LOGN("[WriteLong10]");
-    m_sts |= onWriteLongCommand(((uint32_t)cmd[2] << 24) | ((uint32_t)cmd[3] << 16) | ((uint32_t)cmd[4] << 8) | cmd[5], ((uint32_t)cmd[7] << 8) | cmd[8]);
-    break;
-  case 0x5A:
-    LOGN("[ModeSense10]");
-    m_sts |= onModeSenseCommand(cmd[0], cmd[1] & 0x80, cmd[2], ((uint32_t)cmd[7] << 8) | cmd[8]);
-    break;
   default:
     LOGN("[*Unknown]");
+    #if DEBUG >= 3
+      LOG_FILE.print("Unsupported command : ");
+      LOG_FILE.print(cmd[0], HEX); LOG_FILE.print(":");
+      LOG_FILE.print(cmd[1], HEX); LOG_FILE.print(":");
+      LOG_FILE.print(cmd[2], HEX); LOG_FILE.print(":");
+      LOG_FILE.print(cmd[3], HEX); LOG_FILE.print(":");
+      LOG_FILE.print(cmd[4], HEX); LOG_FILE.print(":");
+      LOG_FILE.println(cmd[5], HEX);
+      LOG_FILE.sync();
+    #endif
     m_sts |= 0x02;
     m_senseKey = 5;  // Illegal request
     m_addition_sense = 0x2000; // Invalid Command Operation Code
