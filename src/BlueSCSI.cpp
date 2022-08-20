@@ -42,8 +42,8 @@
 #warning "warning USE_STM32_DMA"
 #endif
 
-#define VERSION "2.1-PACJUNK(220724)"
-#define DEBUG            4      // 0:No debug information output
+#define VERSION "2.1-PACJUNK(220814)"
+#define DEBUG            0      // 0:No debug information output
                                 // 1: Debug information output to USB Serial
                                 // 2: Debug information output to LOG.txt (slow)
                                 // 3: Report unsupported command and page codes only to LOG.txt
@@ -190,7 +190,7 @@ SdFs SD;
 #define HDIMG_ID_POS  2                 // Position to embed ID number
 #define HDIMG_LUN_POS 3                 // Position to embed LUN numbers
 #define HDIMG_BLK_POS 5                 // Position to embed block size numbers
-#define MAX_FILE_PATH 32                // Maximum file name length
+#define MAX_FILE_PATH 128               // Maximum file name length
 
 #define DEFAULT_VENDOR  "QUANTUM "
 #define DEFAULT_PRODUCT "FIREBALL1       "
@@ -345,7 +345,7 @@ void readSCSIDeviceConfig(HDDIMG *cimg, const char *image_name)
   char vendor[LEN_VENDOR+1] = {0};
   char product[LEN_PRODUCT+1] = {0};
   char version[LEN_VERSION+1] = {0};
-  char cfgname[MAX_FILE_PATH] = "#";
+  char cfgname[MAX_FILE_PATH+2] = "#";
 
   strcat(cfgname,image_name);
   FsFile config_file = SD.open(cfgname, O_RDONLY);
@@ -406,13 +406,12 @@ void readSDCardInfo()
     LOG_FILE.println(sd_cid.pnm[4]);
 
     LOG_FILE.print("Sd Date:");
-    LOG_FILE.print(sd_cid.mdt_month);
-    LOG_FILE.print("/20"); // CID year is 2000 + high/low
-    LOG_FILE.print(sd_cid.mdt_year_high);
-    LOG_FILE.println(sd_cid.mdt_year_low);
+    LOG_FILE.print(sd_cid.mdtMonth());
+    LOG_FILE.print("/");
+    LOG_FILE.println(sd_cid.mdtYear());
 
     LOG_FILE.print("Sd Serial:");
-    LOG_FILE.println(sd_cid.psn);
+    LOG_FILE.println(sd_cid.psn());
     LOG_FILE.sync();
   }
 }
@@ -481,13 +480,6 @@ void setup()
   gpio_mode(LED, GPIO_OUTPUT_OD);
   LED_OFF();
 
-  //GPIO(SCSI BUS)Initialization
-  //Port setting register (lower)
-//  GPIOB->regs->CRL |= 0x000000008; // SET INPUT W/ PUPD on PAB-PB0
-  //Port setting register (upper)
-  //GPIOB->regs->CRH = 0x88888888; // SET INPUT W/ PUPD on PB15-PB8
-//  GPIOB->regs->ODR = 0x0000FF00; // SET PULL-UPs on PB15-PB8
-  // DB and DP are input modes
   SCSI_DB_INPUT()
 
   // Input port
@@ -514,7 +506,6 @@ void setup()
     noSDCardFound();
   }
   initFileLog();
-  readSDCardInfo();
 
   //Sector data overrun byte setting
   m_buf[MAX_BLOCKSIZE] = 0xff; // DB0 all off,DBP off
@@ -589,12 +580,16 @@ void setup()
           LOG_FILE.println(name);
           LOG_FILE.sync();
         }
-      } else {
+      } 
+      #if DEBUG > 0
+        
+        else {
           LOG_FILE.println("");
           LOG_FILE.print("Not an image: ");
           LOG_FILE.println(name);
           LOG_FILE.sync();
-      }
+        }
+      #endif
     }
   }
   if(usedDefaultId > 1) {
@@ -624,13 +619,26 @@ void initFileLog() {
   LOG_FILE.print("VERSION: ");
   LOG_FILE.println(VERSION);
   LOG_FILE.print("DEBUG:");
-  LOG_FILE.print(DEBUG);
-  LOG_FILE.print(" SDFAT_FILE_TYPE:");
-  LOG_FILE.println(SDFAT_FILE_TYPE);
+  LOG_FILE.println(DEBUG);
   LOG_FILE.print("SdFat version: ");
   LOG_FILE.println(SD_FAT_VERSION_STR);
   LOG_FILE.print("SdFat Max FileName Length: ");
   LOG_FILE.println(MAX_FILE_PATH);
+  LOG_FILE.print("SDFAT_FILE_TYPE:");
+  LOG_FILE.println(SDFAT_FILE_TYPE);
+  LOG_FILE.print("Sd Format: ");
+  switch(SD.vol()->fatType()) {
+    case FAT_TYPE_EXFAT:
+      LOG_FILE.println("exFAT");
+      break;
+    case FAT_TYPE_FAT32:
+      LOG_FILE.print("FAT32");
+    case FAT_TYPE_FAT16:
+      LOG_FILE.print("FAT16");
+    default:
+      LOG_FILE.println(" - Consider formatting the SD Card with exFAT for improved performance.");
+  }
+  readSDCardInfo();
   LOG_FILE.println("Initialized SD Card - lets go!");
   LOG_FILE.sync();
 }
@@ -640,6 +648,7 @@ void initFileLog() {
  */
 void finalizeFileLog() {
   // View support drive map
+  LOG_FILE.println();
   LOG_FILE.print("ID");
   for(int lun=0;lun<NUM_SCSILUN;lun++)
   {
@@ -665,6 +674,7 @@ void finalizeFileLog() {
     }
     LOG_FILE.println(":");
   }
+  LOG_FILE.println();
   LOG_FILE.println("Finished initialization of SCSI Devices - Entering main loop.");
   LOG_FILE.sync();
   #if DEBUG <= 1 
@@ -1064,12 +1074,13 @@ byte onModeSelectCommand(byte scsi_cmd, byte sp, uint32_t len)
   }
   readDataPhase(len, m_buf); // Read data in, but don't do anything with it.
   #if DEBUG == 4
-  LOG_FILE.println("Select data : ");
-  for (unsigned i = 0; i < len; i++) {
-    LOG_FILE.print(m_buf[i], HEX); LOG_FILE.print(" ");
-  }
-  LOG_FILE.println("");
-  LOG_FILE.sync();
+      LOG_FILE.println("");
+      LOG_FILE.print("Select data : ");
+      for (unsigned i = 0; i < len; i++) {
+        LOG_FILE.print(m_buf[i], HEX); LOG_FILE.print(" ");
+      }
+      LOG_FILE.println("");
+      LOG_FILE.sync();
   #endif
   return 0x00;
 }
