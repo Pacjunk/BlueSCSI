@@ -42,7 +42,7 @@
 #warning "warning USE_STM32_DMA"
 #endif
 
-#define VERSION "2.1-PACJUNK(220814)"
+#define VERSION "2.1-PACJUNK(230403)"
 #define DEBUG            0      // 0:No debug information output
                                 // 1: Debug information output to USB Serial
                                 // 2: Debug information output to LOG.txt (slow)
@@ -1117,6 +1117,7 @@ byte onModeSenseCommand(byte scsi_cmd, byte dbd, int cmd2, uint32_t len)
       case 0x01: // Read/Write Error Recovery
         m_buf[a + 0] = 0x01;
         m_buf[a + 1] = 0x0A;
+        m_buf[a + 2] = 0x26; // TB, PER, DTE required for VMS <= 7.0
         a += 0x0C;
         if(page_code != 0x3F) break;
 
@@ -1130,7 +1131,7 @@ byte onModeSenseCommand(byte scsi_cmd, byte dbd, int cmd2, uint32_t len)
         m_buf[a + 0] = 0x03; //Page code
         m_buf[a + 1] = 0x16; // Page length
         if(pageControl != 1) {
-            m_buf[a + 11] = 0x3F;//Number of sectors / track
+            m_buf[a + 11] = GEOM_SECTORS; //Number of sectors / track
             m_buf[a + 12] = (byte)(bl >> 8);
             m_buf[a + 13] = (byte)bl;
             m_buf[a + 15] = 0x1; // Interleave
@@ -1178,6 +1179,12 @@ byte onModeSenseCommand(byte scsi_cmd, byte dbd, int cmd2, uint32_t len)
         if(pageControl != 1) {
           m_buf[a + 2] = 0x01; // Disable read cache
         }
+        a += 0x0C;
+        if(page_code != 0x3F) break;
+
+      case 0x0A:  // Control mode page
+        m_buf[a + 0] = 0x0A; //Page code
+        m_buf[a + 1] = 0x06; // Page length
         a += 0x08;
         if(page_code != 0x3F) break;
 
