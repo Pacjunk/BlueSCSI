@@ -42,7 +42,7 @@
 #warning "warning USE_STM32_DMA"
 #endif
 
-#define VERSION "2.1-PACJUNK(230403)"
+#define VERSION "2.1-PACJUNK(230304)"
 #define DEBUG            0      // 0:No debug information output
                                 // 1: Debug information output to USB Serial
                                 // 2: Debug information output to LOG.txt (slow)
